@@ -177,6 +177,9 @@ screenshot-ui-explainer/
     └── output/                      # 示例产物
 ```
 
+`docs/` 下另有一张 1280×640 的社交预览图（`social-preview.png`），
+由 `docs/make_social_preview.py` 生成，用于 GitHub 仓库的 Social Preview 设置项。
+
 ## License
 
 [MIT](LICENSE)
