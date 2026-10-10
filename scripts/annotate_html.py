@@ -14,6 +14,7 @@ annotations.json 格式见 annotate_png.py 的说明。
 import argparse
 import base64
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -52,6 +53,10 @@ TPL = """<!DOCTYPE html>
     user-select: none;
   }}
   .badge:hover, .badge.active {{ transform: translate(-50%,-50%) scale(1.35); background:{accent}; z-index: 5; }}
+  .leaders {{ position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }}
+  .leaders line, .leaders circle {{ vector-effect: non-scaling-stroke; stroke-linecap: round; }}
+  .leaders .halo {{ stroke: {lead_halo}; stroke-width: 4.5; fill: none; }}
+  .leaders .mark {{ stroke: {lead}; stroke-width: 2; fill: none; }}
   .legend {{ display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 16px; }}
   .group {{ background:{card_bg}; border:1px solid {border}; border-radius:12px; padding:14px 16px 8px; }}
   .group h3 {{
@@ -90,6 +95,7 @@ TPL = """<!DOCTYPE html>
 
   <div class="stage" id="stage">
     <img src="data:image/png;base64,{img_b64}" alt="{title}">
+    {leaders_svg}
     {badges}
   </div>
 
@@ -125,10 +131,12 @@ THEMES = {
     "dark": dict(page_bg="#0d1117", fg="#e6edf3", grey="#8b949e", accent="#58a6ff",
                  stage_bg="#0d1117", card_bg="#161b22", border="#30363d",
                  hover="rgba(88,166,255,.12)", tip_bg="rgba(88,166,255,.14)",
-                 note_bg="rgba(88,166,255,.08)"),
+                 note_bg="rgba(88,166,255,.08)",
+                 lead="#aab2bc", lead_halo="rgba(13,17,23,.95)"),
     "light": dict(page_bg="#f4f5f7", fg="#1f2328", grey="#59636e", accent="#0b57d0",
                   stage_bg="#0d1117", card_bg="#ffffff", border="#e4e7ec",
-                  hover="#f3f6fc", tip_bg="#e8eefb", note_bg="#f0f4fd"),
+                  hover="#f3f6fc", tip_bg="#e8eefb", note_bg="#f0f4fd",
+                  lead="#6e7681", lead_halo="rgba(255,255,255,.95)"),
 }
 
 
@@ -152,6 +160,11 @@ def main():
     ap.add_argument("--theme", choices=["dark", "light"], default="dark")
     ap.add_argument("--title", default=None)
     ap.add_argument("--subtitle", default=None)
+    ap.add_argument("--dot-radius", type=int, default=15,
+                    help="编号圆点基准半径（原图像素），默认 15；单条可用 dot_r 覆盖")
+    ap.add_argument("--no-leader", action="store_true", help="圆点被挪开时不画引线")
+    ap.add_argument("--leader-threshold", type=int, default=60,
+                    help="圆点离元素超过这个像素距离才画引线，默认 60")
     args = ap.parse_args()
 
     src = Path(args.annotations)
@@ -165,12 +178,33 @@ def main():
     W, H = Image.open(image_path).size
     img_b64 = base64.b64encode(Path(image_path).read_bytes()).decode()
 
-    badges = []
+    # 圆点：默认画在 label 位置（没写 label 就等于 x/y），大小可用 dot_r 逐条缩放。
+    # 网页里的 26px 对应原图 r=15，因此这里按 r 等比换算，保证小圆点在页面上也小。
+    badges, leaders = [], []
     for a in items:
-        x, y = a.get("label_x", a["x"]), a.get("label_y", a["y"])
+        lx, ly = a.get("label_x", a["x"]), a.get("label_y", a["y"])
+        size = max(14, int(round(int(a.get("dot_r") or args.dot_radius) * 26 / 15)))
         badges.append(
             f'<span class="badge" data-n="{a["n"]}" '
-            f'style="left:{x / W * 100:.3f}%;top:{y / H * 100:.3f}%">{a["n"]}</span>')
+            f'style="left:{lx / W * 100:.3f}%;top:{ly / H * 100:.3f}%;'
+            f'width:{size}px;height:{size}px;line-height:{size - 4}px;'
+            f'font-size:{max(9, round(size * 0.48))}px">{a["n"]}</span>')
+        # 圆点被挪得较远时，补一条引线指回元素真实中心 x/y
+        if not args.no_leader and math.hypot(a["x"] - lx, a["y"] - ly) > args.leader_threshold:
+            leaders.append((lx, ly, a["x"], a["y"]))
+
+    leaders_svg = ""
+    if leaders:
+        halo, mark = [], []
+        for lx, ly, ax, ay in leaders:
+            seg = (f'x1="{lx:.1f}" y1="{ly:.1f}" x2="{ax:.1f}" y2="{ay:.1f}"',)
+            halo.append(f'<line {seg[0]} class="halo"/>')
+            mark.append(f'<line {seg[0]} class="mark"/>')
+            halo.append(f'<circle cx="{ax:.1f}" cy="{ay:.1f}" r="5" class="halo"/>')
+            mark.append(f'<circle cx="{ax:.1f}" cy="{ay:.1f}" r="5" class="mark"/>')
+        leaders_svg = ('<svg class="leaders" viewBox="0 0 {w} {h}" '
+                       'preserveAspectRatio="none" aria-hidden="true">{a}{b}</svg>'
+                       ).format(w=W, h=H, a="".join(halo), b="".join(mark))
 
     order, grouped = [], {}
     for a in items:
@@ -198,6 +232,7 @@ def main():
     html = TPL.format(
         title=title, count=len(items), img_b64=img_b64,
         badges="\n    ".join(badges), groups="\n    ".join(blocks),
+        leaders_svg=leaders_svg,
         subtitle_html=f'<span class="tip">{sub}</span>' if sub else "",
         **THEMES[args.theme])
 

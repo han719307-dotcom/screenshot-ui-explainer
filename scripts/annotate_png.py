@@ -10,7 +10,7 @@ annotations.json 格式（列表）：
 [
   {
     "n": 1,                    # 编号（必填，唯一）
-    "x": 44, "y": 41,          # 原图像素坐标（必填）—— 圆点圆心
+    "x": 44, "y": 41,          # 元素真实中心的原图像素坐标（必填）
     "group": "顶部导航栏",      # 分组名（必填，决定图例分区）
     "title": "汉堡菜单（☰）",    # 条目名（必填）
     "desc": "收起/展开左侧导航栏。"  # 说明（可选，仅 HTML 版展示）
@@ -18,16 +18,23 @@ annotations.json 格式（列表）：
 ]
 
 可选字段：
-    "label_x"/"label_y"  不填则用 x/y
+    "label_x"/"label_y"  圆点的实际绘制位置；不填则直接画在 x/y 上。
+                         当它与 x/y 相距较远时，会自动画一条引线连到元素真实中心。
+    "dot_r"              该条圆点半径（原图像素），用于塞进窄区域；不填用 --dot-radius
 
 设计要点（踩过坑）：
+- x/y 一律填**元素真实中心**，需要把圆点挪开时只动 label_x/label_y。
+  这样换图重测坐标时能一眼看出哪些是实测值、哪些是手工微调。
 - 圆点不要压住文字，压在空白处或元素正上方/正下方；小图标按钮尽量落在元素内部空白。
+- 顶栏这类窄区域（高 40-60px）放不下 r=15 的圆点：用 --dot-radius 或逐条 dot_r 缩小，
+  或者把圆点放到区域外再用 label_x/label_y 引线指回来。
 - 图例面板用与截图同色系的背景，视觉上是一张图；浅色主题自动切换配色。
 - 字号不要太小，导出后缩放仍要清晰；编号为两位数字时圆点半径要留余量。
 """
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -74,6 +81,26 @@ def wrap_text(draw, text, font, max_width):
     return lines
 
 
+def draw_leader(d, x0, y0, ax, ay, r, color, halo, min_dist=60):
+    """从圆点边缘向元素真实中心 (ax, ay) 画一条带描边的引线，并在锚点画空心圆环。
+
+    只在圆点被挪得足够远（> min_dist）时才调用——小幅微调不需要引线，
+    否则整张图都是线，反而看不清。先画描边粗线再画彩色细线，
+    这样不论截图是深底还是浅底，引线都看得清。
+    """
+    dx, dy = ax - x0, ay - y0
+    dist = math.hypot(dx, dy)
+    if dist <= max(min_dist, r + 8):
+        return
+    ux, uy = dx / dist, dy / dist
+    sx, sy = x0 + ux * (r + 3), y0 + uy * (r + 3)   # 从圆点边缘起，别压在圆点上
+    ex, ey = ax - ux * 6, ay - uy * 6               # 到锚点前留一点，别盖住圆环
+    d.line([(sx, sy), (ex, ey)], fill=halo, width=4)
+    d.line([(sx, sy), (ex, ey)], fill=color, width=2)
+    d.ellipse([ax - 5, ay - 5, ax + 5, ay + 5], outline=halo, width=4)
+    d.ellipse([ax - 5, ay - 5, ax + 5, ay + 5], outline=color, width=2)
+
+
 def collect_groups(data):
     """把标注按 group 归并，并从可选的 groups 元信息里取出每个分组的用途说明。
 
@@ -108,7 +135,15 @@ def main():
                     help="原图路径；不填则读取 annotations.json 同目录下的 source 字段或 github-dashboard 约定")
     ap.add_argument("-o", "--output", default="annotated.png", help="输出 PNG 路径")
     ap.add_argument("--theme", choices=["dark", "light"], default="dark")
+    ap.add_argument("--title", default=None, help="图例面板标题，覆盖 JSON 里的 title")
+    ap.add_argument("--subtitle", default=None, help="副标题，覆盖 JSON 里的 subtitle")
     ap.add_argument("--panel-width", type=int, default=620, help="右侧图例带宽，默认 620")
+    ap.add_argument("--dot-radius", type=int, default=15,
+                    help="编号圆点半径（原图像素），默认 15；单条可用 dot_r 覆盖")
+    ap.add_argument("--no-leader", action="store_true",
+                    help="圆点被挪开时不画引线")
+    ap.add_argument("--leader-threshold", type=int, default=60,
+                    help="圆点离元素超过这个像素距离才画引线，默认 60（小幅微调不画线，避免图面变乱）")
     ap.add_argument("--font", default=None, help="常规字体路径，默认自动探测中文字体")
     ap.add_argument("--font-bold", default=None, help="粗体字体路径，默认自动探测中文字体")
     ap.add_argument("--no-panel", action="store_true", help="只画编号，不拼图例面板")
@@ -130,10 +165,12 @@ def main():
         BG, FG, GRP, GREY, DOT, DOT_EDGE = (
             (13, 17, 23), (230, 237, 243), (88, 166, 255),
             (139, 148, 158), (240, 68, 56), (255, 255, 255))
+        LEAD, LEAD_HALO = (170, 178, 188), (13, 17, 23)
     else:
         BG, FG, GRP, GREY, DOT, DOT_EDGE = (
             (255, 255, 255), (31, 35, 40), (11, 87, 208),
             (89, 99, 110), (240, 68, 56), (255, 255, 255))
+        LEAD, LEAD_HALO = (110, 118, 129), (255, 255, 255)
 
     im = Image.open(image_path).convert("RGB")
     W, H = im.size
@@ -159,7 +196,7 @@ def main():
 
     # ---------- 图例分组（含每个分组的用途说明） ----------
     groups = collect_groups(data)
-    sub_text = data.get("subtitle") if isinstance(data, dict) else None
+    sub_text = args.subtitle or (data.get("subtitle") if isinstance(data, dict) else None)
 
     TITLE_H, SUB_H, FOOT = 40, 26, 20   # 标题占位 / 副标题占位 / 底部留白
     ITEM_H, GROUP_H = 34, 42
@@ -199,15 +236,30 @@ def main():
     d = ImageDraw.Draw(canvas)
 
     # ---------- 编号圆点 ----------
+    badge_cache = {}
+
+    def badge_font(px_size):
+        """按圆点大小取对应字号的编号字体（圆点缩小后字号也要跟着缩）。"""
+        px_size = max(8, int(round(px_size)))
+        if px_size not in badge_cache:
+            badge_cache[px_size] = (ImageFont.truetype(bold_path, px_size)
+                                    if bold_path else ImageFont.load_default(px_size))
+        return badge_cache[px_size]
+
     for a in items:
         x, y = a.get("label_x", a["x"]), a.get("label_y", a["y"])
-        r = 15 if len(str(a["n"])) < 2 else 16
+        r = int(a.get("dot_r") or args.dot_radius)
+        if "dot_r" not in a and len(str(a["n"])) > 1:
+            r += 1                      # 两位数编号留点余量
+        if not args.no_leader:
+            draw_leader(d, x, y, a["x"], a["y"], r, LEAD, LEAD_HALO, args.leader_threshold)
         d.ellipse([x - r - 2, y - r - 2, x + r + 2, y + r + 2], fill=DOT_EDGE)
         d.ellipse([x - r, y - r, x + r, y + r], fill=DOT)
         t = str(a["n"])
-        bb = d.textbbox((0, 0), t, font=F_BADGE)
+        f = badge_font(r * 1.13)
+        bb = d.textbbox((0, 0), t, font=f)
         d.text((x - (bb[2] - bb[0]) / 2 - bb[0], y - (bb[3] - bb[1]) / 2 - bb[1]),
-               t, font=F_BADGE, fill=(255, 255, 255))
+               t, font=f, fill=(255, 255, 255))
 
     if args.no_panel:
         canvas.save(args.output)
@@ -217,7 +269,7 @@ def main():
     # ---------- 图例面板 ----------
     px = base_x + 30
     right = W + args.panel_width - 30
-    title = data.get("title", "界面标注") if isinstance(data, dict) else "界面标注"
+    title = args.title or (data.get("title") if isinstance(data, dict) else None) or "界面标注"
     d.text((px, 26), title, font=F_HEAD, fill=FG)
     sub = sub_text
     if sub:
